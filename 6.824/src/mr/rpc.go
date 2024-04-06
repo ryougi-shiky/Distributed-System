@@ -9,6 +9,8 @@ package mr
 import (
 	"os"
 	"strconv"
+
+	"github.com/google/uuid"
 )
 
 //
@@ -25,17 +27,25 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
-type TaskRequest struct {
-	X int
+type FetchTaskArgs struct {
+	Msg    string
+	NodeId uuid.UUID
+}
+type FetchTaskReply struct {
+	Msg    string
+	Task   *Task
+	NodeId uuid.UUID
 }
 
-type TaskResponse struct {
-	RespTask       Task
-	NumMapTasks    int
-	NumReduceTasks int
-	MapTasksFin    chan bool
-	ReduceTasksFin chan bool
-	State          int
+type SubmitTaskArgs struct {
+	Msg    string
+	NodeId uuid.UUID
+	Task   *Task
+}
+
+type SubmitTaskReply struct {
+	Msg    string
+	NodeId uuid.UUID
 }
 
 // Cook up a unique-ish UNIX-domain socket name
