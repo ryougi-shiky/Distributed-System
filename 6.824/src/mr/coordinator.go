@@ -25,7 +25,8 @@ type Coordinator struct {
 type Task struct {
 	FileName string
 	// State    int // 0 is idle; 1 is in progress; 2 is done
-	ID int
+	IdMap    int
+	IdReduce int
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -50,7 +51,7 @@ func (c *Coordinator) GetTask(args *TaskRequest, reply *TaskResponse) error {
 		reduceTask, isReceived := <-c.ReduceTasks
 		if isReceived {
 			reply.RespTask = reduceTask
-			fmt.Printf("Reduce task %d is assigned\n", reduceTask.ID)
+			fmt.Printf("Reduce task %d is assigned\n", reduceTask.IdReduce)
 		} else {
 			fmt.Println("All tasks are done")
 		}
@@ -119,12 +120,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	}
 	// Your code here.
 	for i, file := range files {
-		c.MapTasks <- Task{FileName: file, ID: i}
-
+		c.MapTasks <- Task{FileName: file, IdMap: i}
 	}
 
 	for i := 0; i < nReduce; i++ {
-		c.ReduceTasks <- Task{ID: i}
+		c.ReduceTasks <- Task{IdReduce: i}
 	}
 
 	c.server()

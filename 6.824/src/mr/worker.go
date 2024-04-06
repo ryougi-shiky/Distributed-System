@@ -51,10 +51,11 @@ func Worker(mapf func(string, string) []KeyValue,
 		// uncomment to send the Example RPC to the coordinator.
 		CallGetTask(&args, &reply)
 		filename := reply.RespTask.FileName
-		id := reply.RespTask.ID
+
 		state := reply.State
 
 		if state == 1 && len(filename) != 0 {
+			id := reply.RespTask.IdMap
 			file, err := os.Open(filename)
 			if err != nil {
 				log.Fatalf("cannot open map task: %v\n", filename)
@@ -72,24 +73,27 @@ func Worker(mapf func(string, string) []KeyValue,
 				bucket[ihash(kv.Key)%reply.NumReduceTasks] = append(bucket[ihash(kv.Key)%reply.NumReduceTasks], kv)
 			}
 			for i := 0; i < reply.NumReduceTasks; i++ {
-				intermediate := fmt.Sprintf("mr-%d-%d", id, i)
-				file, err := os.Create(intermediate)
+				intermediate, err := ioutil.TempFile("", "mr-tmp-*")
 				if err != nil {
 					log.Fatalf("cannot create intermediate file: %v\n", intermediate)
 				}
-				for _, kv := range kva {
-					if ihash(kv.Key)%reply.NumReduceTasks == i {
-						fmt.Fprintf(file, "%v %v\n", kv.Key, kv.Value)
-					}
+				enc := json.NewEncoder(intermediate)
+				err = enc.Encode(bucket[i])
+				if err != nil {
+					log.Fatalf("cannot encode bucket file: %v\n", intermediate)
 				}
-				file.Close()
+				intermediate.Close()
+				outputFile := fmt.Sprintf("mr-%d-%d", id, i)
+				os.Rename(intermediate.Name(), outputFile)
 			}
-			CallFinishTask(&TaskRequest{X: id}, &TaskResponse{})
+			CallFinishTask()
 		} else if state == 2 {
+			id := reply.RespTask.IdReduce
+			numMapTasks := reply.NumMapTasks
 			if reply.NumMapTasks == len(reply.MapTasksFin) {
 				intermediate := []KeyValue{}
-				for i := 0; i < reply.NumMapTasks; i++ {
-					mapFileName := fmt.Sprintf("mr-%d-%d", id, i)
+				for i := 0; i < numMapTasks; i++ {
+					mapFileName := fmt.Sprintf("mr-%d-%d", i, id)
 					inputFile, err := os.OpenFile(mapFileName, os.O_RDONLY, 0777)
 					if err != nil {
 						log.Fatalf("cannot open reduce task: %v\n", mapFileName)
@@ -105,7 +109,7 @@ func Worker(mapf func(string, string) []KeyValue,
 				}
 				sort.Sort(ByKey(intermediate))
 				outFileName := fmt.Sprintf("mr-out-%d", id)
-				tmpFile, err := ioutil.TempFile("", "mr-tmp-*")
+				tmpFile, err := ioutil.TempFile("", "mr-reduce-*")
 				if err != nil {
 					log.Fatalf("cannot create temp file: %v\n", outFileName)
 				}
@@ -126,7 +130,10 @@ func Worker(mapf func(string, string) []KeyValue,
 				tmpFile.Close()
 				os.Rename(tmpFile.Name(), outFileName)
 			}
-			CallFinishTask(&TaskRequest{X: id}, &TaskResponse{})
+			CallFinishTask()
+			if len(reply.ReduceTasksFin) == reply.NumReduceTasks {
+				break
+			}
 		} else {
 			break
 		}
@@ -176,7 +183,11 @@ func CallGetTask(args *TaskRequest, reply *TaskResponse) {
 	}
 }
 
-func CallFinishTask(args *TaskRequest, reply *TaskResponse) {
+func CallFinishTask() {
+	args := ExampleArgs{}
+
+	// declare a reply structure.
+	reply := ExampleReply{}
 	ok := call("Coordinator.FinishTask", &args, &reply)
 	if ok {
 		// reply.Y should be 100.
