@@ -101,7 +101,7 @@ func (ts *TaskSet) CompleteTask(task *Task) bool {
 	default:
 		// log.Panic("Cannot get unsupported task from TaskSet.")
 	}
-	if taskMetaData.Status != Done {
+	if taskMetaData.Status == Done {
 		// log.Printf("Task already completed, thus result abandoned. Task: %v\n", taskMetaData)
 		return false
 	}

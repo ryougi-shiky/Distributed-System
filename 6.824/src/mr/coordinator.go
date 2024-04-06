@@ -106,6 +106,7 @@ func (c *Coordinator) FetchTask(args *FetchTaskArgs, reply *FetchTaskReply) erro
 		// log.Println("[Coordinator] No task is available right now.")
 		if c.checkStageComplete() {
 			c.toNextStage()
+			// log.Printf("[Coordinator] Move to next stage: %d\n", c.CoordinatorStage)
 		}
 		if c.CoordinatorStage == FinishedStage {
 			reply.Task = &Task{Type: ExitTask}
@@ -136,10 +137,7 @@ func (c *Coordinator) registerReduceTasks() {
 }
 
 func (c *Coordinator) SubmitTask(args *SubmitTaskArgs, reply *SubmitTaskReply) error {
-	// log.Printf(
-	// 	"[Coordinator] Worker node %s submits finished task. TaskType: %d, TaskId: %d, Msg: %s\n",
-	// 	args.NodeId, args.Task.Type, args.Task.TaskId, args.Msg,
-	// )
+	// log.Printf("[Coordinator] Worker node %s submits finished task. TaskType: %d, TaskId: %d, Msg: %s\n",args.NodeId, args.Task.Type, args.Task.TaskId, args.Msg,)
 	reply.NodeId = c.Id
 	c.Mutex.Lock()
 	defer c.Mutex.Unlock()
@@ -167,8 +165,7 @@ func (c *Coordinator) timeoutDetecter() {
 			return
 		}
 		for _, task := range timedOutTasks {
-			// log.Printf("[Coordinator] Task timed out, register again. TaskType: %d, TaskId: %d\n",
-			// task.Type, task.TaskId)
+			// log.Printf("[Coordinator] Task timed out, register again. TaskType: %d, TaskId: %d\n",task.Type, task.TaskId)
 			c.TaskSet.RegisterTask(task)
 			go func(task *Task) { c.TaskChannel <- task }(task)
 		}

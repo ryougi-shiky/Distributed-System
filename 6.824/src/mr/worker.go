@@ -218,6 +218,7 @@ func processReduceTask(reducef func(string, []string) string, task *Task) {
 
 func readIntermediateFile(fileName string) []KeyValue {
 	file, err := os.Open(fileName)
+	defer file.Close()
 	if err != nil {
 		// log.Panicf("[Worker] cannot open file %v\n", fileName)
 	}
@@ -227,7 +228,6 @@ func readIntermediateFile(fileName string) []KeyValue {
 	for dec.Decode(&kv) == nil {
 		kva = append(kva, kv)
 	}
-	file.Close()
 	return kva
 }
 
