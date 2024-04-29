@@ -19,13 +19,16 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"log"
+	"math"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -61,6 +64,9 @@ type AppendEntriesArgs struct {
 
 type AppendEntriesReply struct {
 	Term    int  // currentTerm, for leader to update itself
+	XTerm   int  // term in the conflicting entry (if any)
+	XIndex  int  // index of first entry with that term (if any)
+	XLen    int  // log length
 	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
 }
 
@@ -130,14 +136,21 @@ func (rf *Raft) GetState() (int, bool) {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
+	Debug(dPersist, "S%d Saving persistent state to stable storage at T%d.", rf.me, rf.currentTerm)
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if err := e.Encode(rf.currentTerm); err != nil {
+		Debug(dError, "Raft.readPersist: failed to decode \"rf.currentTerm\". err: %v, data: %v", err, rf.currentTerm)
+	}
+	if err := e.Encode(rf.votedFor); err != nil {
+		Debug(dError, "Raft.readPersist: failed to decode \"rf.votedFor\". err: %v, data: %v", err, rf.votedFor)
+	}
+	if err := e.Encode(rf.log); err != nil {
+		Debug(dError, "Raft.readPersist: failed to decode \"rf.log\". err: %v, data: %v", err, rf.log)
+	}
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
@@ -145,19 +158,21 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
+	Debug(dPersist, "S%d Restoring previously persisted state at T%d.", rf.me, rf.currentTerm)
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if err := d.Decode(&rf.currentTerm); err != nil {
+		Debug(dError, "Raft.readPersist: failed to decode \"rf.currentTerm\". err: %v, data: %s", err, data)
+	}
+	if err := d.Decode(&rf.votedFor); err != nil {
+		Debug(dError, "Raft.readPersist: failed to decode \"rf.votedFor\". err: %v, data: %s", err, data)
+	}
+	if err := d.Decode(&rf.log); err != nil {
+		Debug(dError, "Raft.readPersist: failed to decode \"rf.log\". err: %v, data: %s", err, data)
+	}
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -197,6 +212,7 @@ type RequestVoteReply struct {
 }
 
 // example RequestVote RPC handler.
+// example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
@@ -223,6 +239,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			Debug(dVote, "S%d Granting vote to S%d at T%d.", rf.me, args.CandidateId, args.Term)
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateId
+			rf.persist()
 			Debug(dTimer, "S%d Resetting ELT, wait for next potential election timeout.", rf.me)
 			rf.setElectionTimeout(randElectionTimeout())
 		} else {
@@ -298,6 +315,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = len(rf.log)
 	term = rf.currentTerm
 	Debug(dLog, "S%d Add command at T%d. LI: %d, Command: %v\n", rf.me, term, index, command)
+	rf.persist()
 	rf.sendEntries(false)
 
 	return index, term, isLeader
@@ -380,6 +398,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	for peer := range rf.peers {
+		rf.nextIndex[peer] = len(rf.log) + 1
+	}
 
 	lastLogIndex, lastLogTerm := rf.log.lastLogInfo()
 	Debug(dClient, "S%d Started at T%d. LLI: %d, LLT: %d.", rf.me, rf.currentTerm, lastLogIndex, lastLogTerm)
@@ -478,6 +500,7 @@ func (rf *Raft) checkTerm(term int) bool {
 		rf.state = FollowerState
 		rf.currentTerm = term
 		rf.votedFor = -1
+		rf.persist()
 		return true
 	}
 	return false
@@ -490,6 +513,7 @@ func (rf *Raft) raiseElection() {
 	Debug(dTerm, "S%d Starting a new term. Now at T%d.", rf.me, rf.currentTerm)
 	// Vote for self
 	rf.votedFor = rf.me
+	rf.persist()
 	// Reset election timer
 	rf.setElectionTimeout(randElectionTimeout())
 	Debug(dTimer, "S%d Resetting ELT because of election, wait for next potential election timeout.", rf.me)
@@ -588,17 +612,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 	if args.PrevLogTerm == -1 || args.PrevLogTerm != rf.log.getEntry(args.PrevLogIndex).Term {
 		Debug(dLog2, "S%d Prev log entries do not match. Ask leader to retry.", rf.me)
+		reply.XLen = len(rf.log)
+		reply.XTerm = rf.log.getEntry(args.PrevLogIndex).Term
+		reply.XIndex, _ = rf.log.getBoundsWithTerm(reply.XTerm)
 		return
 	}
 	// If an existing entry conflicts with a new one (same index but different terms),
 	// delete the existing entry and all that follow it (§5.3)
 	for i, entry := range args.Entries {
 		if rf.log.getEntry(i+1+args.PrevLogIndex).Term != entry.Term {
+			Debug(dLog2, "S%d Running into conflict with existing entries at T%d. conflictLogs: %v, startIndex: %d.",
+				rf.me, rf.currentTerm, args.Entries[i:], i+1+args.PrevLogIndex)
 			rf.log = append(rf.log.getSlice(1, i+1+args.PrevLogIndex), args.Entries[i:]...)
 			break
 		}
 	}
 	Debug(dLog2, "S%d <- S%d Append entries success. Saved logs: %v.", rf.me, args.LeaderId, args.Entries)
+	if len(args.Entries) > 0 {
+		rf.persist()
+	}
 	if args.LeaderCommit > rf.commitIndex {
 		Debug(dCommit, "S%d Get higher LC at T%d, updating commitIndex. (%d < %d)",
 			rf.me, rf.currentTerm, rf.commitIndex, args.LeaderCommit)
@@ -659,7 +691,7 @@ func (rf *Raft) leaderSendEntries(args *AppendEntriesArgs, server int) {
 			return
 		}
 		if rf.currentTerm != args.Term {
-			Debug(dWarn, "S%d Term has changed after the append request, send entry reply discarded. "+
+			Debug(dWarn, "S%d Term has changed after the append request, send entry reply discarded."+
 				"requestTerm: %d, currentTerm: %d.", rf.me, args.Term, rf.currentTerm)
 			return
 		}
@@ -693,8 +725,19 @@ func (rf *Raft) leaderSendEntries(args *AppendEntriesArgs, server int) {
 			}
 		} else {
 			// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
-			if rf.nextIndex[server] > 1 {
-				rf.nextIndex[server]--
+			// the optimization that backs up nextIndex by more than one entry at a time
+			if reply.XTerm == -1 {
+				// follower's log is too short
+				rf.nextIndex[server] = reply.XLen + 1
+			} else {
+				_, maxIndex := rf.log.getBoundsWithTerm(reply.XTerm)
+				if maxIndex != -1 {
+					// leader has XTerm
+					rf.nextIndex[server] = maxIndex
+				} else {
+					// leader doesn't have XTerm
+					rf.nextIndex[server] = reply.XIndex
+				}
 			}
 			lastLogIndex, _ := rf.log.lastLogInfo()
 			nextIndex := rf.nextIndex[server]
@@ -765,4 +808,23 @@ func (rf *Raft) applyLogsLoop(applyCh chan ApplyMsg) {
 		}
 		time.Sleep(time.Duration(TickInterval) * time.Millisecond)
 	}
+}
+
+// Get the index of first entry and last entry with the given term.
+// Return (-1,-1) if no such term is found
+func (logEntries LogEntries) getBoundsWithTerm(term int) (minIndex int, maxIndex int) {
+	if term == 0 {
+		return 0, 0
+	}
+	minIndex, maxIndex = math.MaxInt, -1
+	for i := 1; i <= len(logEntries); i++ {
+		if logEntries.getEntry(i).Term == term {
+			minIndex = min(minIndex, i)
+			maxIndex = max(maxIndex, i)
+		}
+	}
+	if maxIndex == -1 {
+		return -1, -1
+	}
+	return
 }
