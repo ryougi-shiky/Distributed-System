@@ -91,6 +91,8 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	leaderId int // the leader server that current server recognizes
+
 	state         RaftState
 	heartbeatTime time.Time
 	electionTime  time.Time
@@ -283,6 +285,21 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.state != LeaderState {
+		return -1, -1, false
+	}
+	logEntry := LogEntry{
+		Command: command,
+		Term:    rf.currentTerm,
+	}
+	rf.log = append(rf.log, logEntry)
+	index = len(rf.log)
+	term = rf.currentTerm
+	Debug(dLog, "S%d Add command at T%d. LI: %d, Command: %v\n", rf.me, term, index, command)
+	rf.sendEntries(false)
+
 	return index, term, isLeader
 }
 
@@ -343,13 +360,14 @@ func (rf *Raft) ticker() {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-
+	rf.leaderId = -1
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.state = FollowerState
@@ -368,6 +386,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	// Apply logs periodically until the last committed index to make sure state machine is up to date.
+	go rf.applyLogsLoop(applyCh)
 
 	return rf
 }
@@ -562,6 +583,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	Debug(dTimer, "S%d Resetting ELT, wait for next potential heartbeat timeout.", rf.me)
 	rf.setElectionTimeout(randHeartbeatTimeout())
 
+	rf.leaderId = args.LeaderId
+
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 	if args.PrevLogTerm == -1 || args.PrevLogTerm != rf.log.getEntry(args.PrevLogIndex).Term {
 		Debug(dLog2, "S%d Prev log entries do not match. Ask leader to retry.", rf.me)
@@ -576,6 +599,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 	Debug(dLog2, "S%d <- S%d Append entries success. Saved logs: %v.", rf.me, args.LeaderId, args.Entries)
+	if args.LeaderCommit > rf.commitIndex {
+		Debug(dCommit, "S%d Get higher LC at T%d, updating commitIndex. (%d < %d)",
+			rf.me, rf.currentTerm, rf.commitIndex, args.LeaderCommit)
+		rf.commitIndex = min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
+		Debug(dCommit, "S%d Updated commitIndex at T%d. CI: %d.", rf.me, rf.currentTerm, rf.commitIndex)
+	}
 	reply.Success = true
 }
 
@@ -617,7 +646,6 @@ func (rf *Raft) sendEntries(isHeartbeat bool) {
 	}
 }
 
-
 func (rf *Raft) leaderSendEntries(args *AppendEntriesArgs, server int) {
 	reply := &AppendEntriesReply{}
 	ok := rf.sendAppendEntries(server, args, reply)
@@ -645,6 +673,24 @@ func (rf *Raft) leaderSendEntries(args *AppendEntriesArgs, server int) {
 			newMatch := args.PrevLogIndex + len(args.Entries)
 			rf.nextIndex[server] = max(newNext, rf.nextIndex[server])
 			rf.matchIndex[server] = max(newMatch, rf.matchIndex[server])
+			// If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
+			// and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
+			for N := len(rf.log); N > rf.commitIndex && rf.log.getEntry(N).Term == rf.currentTerm; N-- {
+				count := 1
+				for peer, matchIndex := range rf.matchIndex {
+					if peer == rf.me {
+						continue
+					}
+					if matchIndex >= N {
+						count++
+					}
+				}
+				if count > len(rf.peers)/2 {
+					rf.commitIndex = N
+					Debug(dCommit, "S%d Updated commitIndex at T%d for majority consensus. CI: %d.", rf.me, rf.currentTerm, rf.commitIndex)
+					break
+				}
+			}
 		} else {
 			// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
 			if rf.nextIndex[server] > 1 {
@@ -695,4 +741,28 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		}
 	}
 	return ok
+}
+
+func (rf *Raft) applyLogsLoop(applyCh chan ApplyMsg) {
+	for !rf.killed() {
+		// Apply logs periodically until the last committed index.
+		rf.mu.Lock()
+		// To avoid the apply operation getting blocked with the lock held,
+		// use a slice to store all committed msgs to apply, and apply them only after unlocked
+		appliedMsgs := []ApplyMsg{}
+		for rf.commitIndex > rf.lastApplied {
+			rf.lastApplied++
+			appliedMsgs = append(appliedMsgs, ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log.getEntry(rf.lastApplied).Command,
+				CommandIndex: rf.lastApplied,
+			})
+			Debug(dLog2, "S%d Applying log at T%d. LA: %d, CI: %d.", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+		}
+		rf.mu.Unlock()
+		for _, msg := range appliedMsgs {
+			applyCh <- msg
+		}
+		time.Sleep(time.Duration(TickInterval) * time.Millisecond)
+	}
 }
